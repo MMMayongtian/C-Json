@@ -1,3 +1,8 @@
+#ifdef _WINDOWS
+#define _CRTDBG_MAP_ALLOC
+#include <crtdbg.h>
+#endif
+
 #include "json.h"
 #include <assert.h>
 #include <errno.h>   /* errno, ERANGE */
@@ -200,6 +205,50 @@ static int json_parse_string(json_context* context, json_value* value) {
     }
 }
 
+static int json_parse_value(json_context* context, json_value* value); /* 前向声明 */
+
+static int json_parse_array(json_context* context, json_value* value) {
+    size_t size = 0;
+    int ret;
+    EXPECT(context, '[');
+    context->json++;
+    json_parse_whitespace(context);
+    if(*context->json == ']') {
+        context->json++;
+        value->type = JSON_ARRAY;
+        value->size = 0;
+        value->ele = NULL;
+        return JSON_PARSE_OK;
+    }
+    while(1) {
+        json_parse_whitespace(context);
+        json_value ele;
+        /* json_value* ele = json_context_push(context, sizeof(json_value));
+         bug! json_parse_value() 会调用 json_context_push() 
+         栈满时会 realloc() 扩容, 最初 ele 失效 成为悬挂指针 
+         使用 C++ STL 时同样要注意 迭代器(iterator) 在修改容器内容后可能会失效*/
+        json_init(&ele);
+        if ((ret = json_parse_value(context, &ele)) != JSON_PARSE_OK)
+            return ret;
+        memcpy(json_context_push(context, sizeof(json_value)), &ele, sizeof(json_value));
+        size++;
+        if (*context->json ==',') {
+            context->json++;
+            continue;
+        }
+        else if(*context->json ==']') {
+            context->json++;
+            value->type = JSON_ARRAY;
+            value->size = size;
+            size *= sizeof(json_value);
+            value->ele = (json_value*)malloc(size);
+            memcpy(value->ele, json_context_pop(context, size), size);
+            return JSON_PARSE_OK;
+        }
+        else
+            return JSON_PARSE_MISS_COMMA_OR_SQUARE_BRACKET;
+    }
+}
 /* value = null / false / true / numver */
 static int json_parse_value(json_context* context, json_value* value) {
     switch (*context->json) {
@@ -208,6 +257,7 @@ static int json_parse_value(json_context* context, json_value* value) {
         case 't':  return json_parse_literal(context, value, "true", JSON_TRUE);
         default:   return json_parse_number(context, value);
         case '"':  return json_parse_string(context, value);
+        case '[':  return json_parse_array(context, value);
         case '\0': return JSON_PARSE_EXPECT_VALUE;
     }
 }
@@ -292,4 +342,15 @@ void json_set_number(json_value* value, double number) {
 json_type json_get_type(const json_value* value) {
     assert(value != NULL);
     return value->type;
+}
+
+size_t json_get_array_size(const json_value* value) {
+    assert(value != NULL && value->type ==JSON_ARRAY);
+    return value->size;
+}
+
+json_value* json_get_array_element(const json_value* value, size_t index) {
+    assert(value != NULL && value->type == JSON_ARRAY);
+    assert(index < value->size);
+    return &((value->ele)[index]);
 }

@@ -121,6 +121,23 @@ static void test_parse_string() {
     TEST_STRING("\xF0\x9D\x84\x9E", "\"\\ud834\\udd1e\"");  /* G clef sign U+1D11E */
 }
 
+#if defined(_MSC_VER)
+#define EXPECT_EQ_SIZE_T(expect, actual) EXPECT_EQ_BASE((expect) == (actual), (size_t)expect, (size_t)actual, "%Iu")
+#else
+#define EXPECT_EQ_SIZE_T(expect, actual) EXPECT_EQ_BASE((expect) == (actual), (size_t)expect, (size_t)actual, "%zu")
+#endif
+
+static void test_parse_array() {
+    json_value value;
+
+    json_init(&value);
+    EXPECT_EQ_INT(JSON_PARSE_OK, json_parse(&value,"[ ]"));
+    EXPECT_EQ_INT(JSON_ARRAY, json_get_type(&value));
+    EXPECT_EQ_SIZE_T(0, json_get_array_size(&value));
+    json_free(&value);
+
+}
+
 #define TEST_ERROR(error, json)\
     do {\
         json_value value;\
@@ -268,6 +285,10 @@ static void test_access() {
 }
 
 int main() {
+#ifdef _WINDOWS
+    _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
+#endif
+    
     test_parse();
     test_access();
     printf("%d/%d (%3.2f%%) passed\n", test_pass, test_count, test_pass * 100.0 / test_count);
