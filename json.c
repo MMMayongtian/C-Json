@@ -20,7 +20,6 @@
 #define ISDIGIT1TO9(ch)     ((ch) >= '1' && (ch) <= '9')
 #define ISHEX(ch)           ISDIGIT(ch) || ((ch) >= 'a' && (ch) <= 'f') || ((ch) >= 'A' && (ch) <= 'F')
 
-
 #define PUTC(c, ch)         do { *(char*)json_context_push(c, sizeof(char)) = (ch); } while(0)
 
 typedef struct {
@@ -210,6 +209,7 @@ static int json_parse_value(json_context* context, json_value* value); /* 前向
 static int json_parse_array(json_context* context, json_value* value) {
     size_t size = 0;
     int ret;
+
     EXPECT(context, '[');
     context->json++;
     json_parse_whitespace(context);
@@ -221,20 +221,20 @@ static int json_parse_array(json_context* context, json_value* value) {
         return JSON_PARSE_OK;
     }
     while(1) {
-        json_parse_whitespace(context);
-        json_value ele;
         /* json_value* ele = json_context_push(context, sizeof(json_value));
          bug! json_parse_value() 会调用 json_context_push() 
          栈满时会 realloc() 扩容, 最初 ele 失效 成为悬挂指针 
          使用 C++ STL 时同样要注意 迭代器(iterator) 在修改容器内容后可能会失效*/
+        json_value ele;
         json_init(&ele);
         if ((ret = json_parse_value(context, &ele)) != JSON_PARSE_OK)
             return ret;
         memcpy(json_context_push(context, sizeof(json_value)), &ele, sizeof(json_value));
         size++;
+        json_parse_whitespace(context);
         if (*context->json ==',') {
             context->json++;
-            continue;
+            json_parse_whitespace(context);
         }
         else if(*context->json ==']') {
             context->json++;
@@ -245,9 +245,13 @@ static int json_parse_array(json_context* context, json_value* value) {
             memcpy(value->ele, json_context_pop(context, size), size);
             return JSON_PARSE_OK;
         }
-        else
-            return JSON_PARSE_MISS_COMMA_OR_SQUARE_BRACKET;
+        else {
+            ret = JSON_PARSE_MISS_COMMA_OR_SQUARE_BRACKET;
+            break;
+        }
     }
+    /* Pop and free values on the stack */
+    
 }
 /* value = null / false / true / numver */
 static int json_parse_value(json_context* context, json_value* value) {
@@ -289,6 +293,8 @@ void json_free(json_value* value) {
     /* JSON_STRING => JSON_NULL 避免重复释放 */
     if (value->type == JSON_STRING)
         free(value->str);
+    else if (value->type == JSON_ARRAY)
+        free(value->ele);
     value->type = JSON_NULL;
 }
 

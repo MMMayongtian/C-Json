@@ -136,6 +136,34 @@ static void test_parse_array() {
     EXPECT_EQ_SIZE_T(0, json_get_array_size(&value));
     json_free(&value);
 
+    json_init(&value);
+    EXPECT_EQ_INT(JSON_PARSE_OK, json_parse(&value, "[ null, false, true, 123, \"abc\" ]"));
+    EXPECT_EQ_INT(JSON_ARRAY, json_get_type(&value));
+    EXPECT_EQ_SIZE_T(5, json_get_array_size(&value));
+    EXPECT_EQ_INT(JSON_NULL,   json_get_type(json_get_array_element(&value, 0)));
+    EXPECT_EQ_INT(JSON_FALSE,  json_get_type(json_get_array_element(&value, 1)));
+    EXPECT_EQ_INT(JSON_TRUE,   json_get_type(json_get_array_element(&value, 2)));
+    EXPECT_EQ_INT(JSON_NUMBER, json_get_type(json_get_array_element(&value, 3)));
+    EXPECT_EQ_INT(JSON_STRING, json_get_type(json_get_array_element(&value, 4)));
+    EXPECT_EQ_DOUBLE(123.0, json_get_number(json_get_array_element(&value, 3)));
+    EXPECT_EQ_STRING("abc", json_get_string(json_get_array_element(&value, 4)), json_get_string_length(json_get_array_element(&value, 4)));
+    json_free(&value);
+    
+    json_init(&value);
+    EXPECT_EQ_INT(JSON_PARSE_OK, json_parse(&value, "[ [ ] , [ 0 ] , [ 0 , 1 ] , [ 0 , 1 , 2 ] ]"));
+    EXPECT_EQ_INT(JSON_ARRAY, json_get_type(&value));
+    EXPECT_EQ_SIZE_T(4, json_get_array_size(&value));
+    for (int i = 0; i < 4; i++) {
+        json_value* array = json_get_array_element(&value, i);
+        EXPECT_EQ_INT(JSON_ARRAY, json_get_type(array));
+        EXPECT_EQ_SIZE_T(i, json_get_array_size(array));
+        for (int j = 0; j < i; j++) {
+            json_value* ele = json_get_array_element(array, j);
+            EXPECT_EQ_INT(JSON_NUMBER, json_get_type(ele));
+            EXPECT_EQ_DOUBLE((double)j, json_get_number(ele));
+        }
+    }
+    json_free(&value);
 }
 
 #define TEST_ERROR(error, json)\
@@ -165,6 +193,10 @@ static void test_parse_invalid_value() {
     TEST_ERROR(JSON_PARSE_INVALID_VALUE, "inf");
     TEST_ERROR(JSON_PARSE_INVALID_VALUE, "NAN");
     TEST_ERROR(JSON_PARSE_INVALID_VALUE, "nan");
+
+        /* invalid value in array */
+    TEST_ERROR(JSON_PARSE_INVALID_VALUE, "[1,]");
+    TEST_ERROR(JSON_PARSE_INVALID_VALUE, "[\"a\", nul]");
 }
 
 static void test_parse_root_not_singular() {
@@ -230,6 +262,7 @@ static void test_parse() {
     test_parse_false();
     test_parse_number();
     test_parse_string();
+    test_parse_array();
     test_parse_expect_value();
     test_parse_invalid_value();
     test_parse_root_not_singular();
