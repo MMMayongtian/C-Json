@@ -3,6 +3,9 @@
 #include <crtdbg.h>
 #endif
 
+#define true 1
+#define false 0
+
 #include "json.h"
 #include <assert.h>
 #include <errno.h>   /* errno, ERANGE */
@@ -14,13 +17,19 @@
 #define JSON_PARSE_STACK_INIT_SIZE 256
 #endif
 
-#define EXPECT(c, ch)       do { assert(*c->json == (ch)); /*c->json++;*/ } while(0)
+#ifndef LEPT_PARSE_STRINGIFY_INIT_SIZE
+#define LEPT_PARSE_STRINGIFY_INIT_SIZE 256
+#endif
+
+#define EXPECT(c, ch)       do { assert(*c->json == (ch)); c->json++; } while(0)
 
 #define ISDIGIT(ch)         ((ch) >= '0' && (ch) <= '9')
 #define ISDIGIT1TO9(ch)     ((ch) >= '1' && (ch) <= '9')
 #define ISHEX(ch)           ISDIGIT(ch) || ((ch) >= 'a' && (ch) <= 'f') || ((ch) >= 'A' && (ch) <= 'F')
 
 #define PUTC(c, ch)         do { *(char*)json_context_push(c, sizeof(char)) = (ch); } while(0)
+#define PUTS(c, s, len)     memcpy(json_context_push(c, len), s, len)
+
 
 typedef struct {
     const char* json;
@@ -28,7 +37,6 @@ typedef struct {
     size_t size; /* 当前容量 */
     size_t top;  /* 栈顶 */
 }json_context;
-
 
 /* stack */
 static void* json_context_push(json_context* context, size_t size) {
@@ -63,7 +71,7 @@ static void json_parse_whitespace(json_context* context) {
 }
 
 static int json_parse_literal(json_context* context, json_value* value, const char* literal, json_type type) {
-    EXPECT(context, literal[0]);
+    assert(*context->json == literal[0]);
     size_t len = strlen(literal);
     if (strncmp(context->json, literal, len)) {
         return JSON_PARSE_INVALID_VALUE;
@@ -146,22 +154,21 @@ static void json_encode_utf8(json_context* c, unsigned u) {
 
 #define STRING_ERROR(c, ret)   do { c->top = head; return ret; } while(0)
 
-static int json_parse_string(json_context* context, json_value* value) {
-    size_t head;
-    size_t len;
-    unsigned u, u2;
+/* 解析 JSON 字符串,把结果写入 str 和len */
+/* str 指向 c->stack 中的元素, 需要在 c->stack */
+static int json_parse_string_raw(json_context* context, char** str, size_t* len) {
+    size_t head = context->top;
     const char* p;
-
-    head = context->top;
+    unsigned u, u2;
     EXPECT(context, '\"');
-    p = context->json + 1;
+    p = context->json;
 
-    while (1) {
+    while(1) {
         char ch = *p++;
         switch(ch) {
-            case '\"': 
-                len = context->top - head;
-                json_set_string(value, (const char*)json_context_pop(context, len), len);
+            case '\"':
+                *len = context->top - head;
+                *str = (const char*)json_context_pop(context, *len);
                 context->json = p;
                 return JSON_PARSE_OK;
             case '\\':
@@ -204,6 +211,15 @@ static int json_parse_string(json_context* context, json_value* value) {
     }
 }
 
+static int json_parse_string(json_context* context, json_value* value) {
+    int ret;
+    char* str;
+    size_t len;
+    if ((ret = json_parse_string_raw(context, &str, &len)) == JSON_PARSE_OK) 
+        json_set_string(value, str, len);
+    return ret;
+}
+
 static int json_parse_value(json_context* context, json_value* value); /* 前向声明 */
 
 static int json_parse_array(json_context* context, json_value* value) {
@@ -211,7 +227,6 @@ static int json_parse_array(json_context* context, json_value* value) {
     int ret;
 
     EXPECT(context, '[');
-    context->json++;
     json_parse_whitespace(context);
     if(*context->json == ']') {
         context->json++;
@@ -228,7 +243,7 @@ static int json_parse_array(json_context* context, json_value* value) {
         json_value ele;
         json_init(&ele);
         if ((ret = json_parse_value(context, &ele)) != JSON_PARSE_OK)
-            return ret;
+            break;
         memcpy(json_context_push(context, sizeof(json_value)), &ele, sizeof(json_value));
         size++;
         json_parse_whitespace(context);
@@ -251,8 +266,210 @@ static int json_parse_array(json_context* context, json_value* value) {
         }
     }
     /* Pop and free values on the stack */
-    
+    for (size_t i = 0; i < size; i++)
+        json_free((json_value*)json_context_pop(context, sizeof(json_value)));
+    return ret;
 }
+
+static int json_parse_object(json_context* context, json_value* value) {
+    size_t size;
+    json_member mem;
+    int ret;
+    EXPECT(context, '{');
+    json_parse_whitespace(context);
+    if (*context->json == '}') {
+        context->json++;
+        value->type = JSON_OBJECT;
+        value->mem = 0;
+        value->msize = 0;
+        return JSON_PARSE_OK;
+    }
+    mem.key = NULL;
+    size = 0;
+    while(1) {
+        char* str;
+        json_init(&mem.value);
+        if (*context->json != '"') {
+            ret = JSON_PARSE_MISS_KEY;
+            break;
+        }
+        if ((ret = json_parse_string_raw(context, &str, &mem.keylen)) != JSON_PARSE_OK)
+            break;
+        mem.key = (char*) malloc(mem.keylen + 1);
+        memcpy(mem.key, str, mem.keylen);
+        mem.key[mem.keylen] = '\0';
+        /* parse ws colon ws */
+        json_parse_whitespace(context);
+        if(*context->json != ':') {
+            ret = JSON_PARSE_MISS_COLON;
+            break;
+        }
+        context->json++;
+        json_parse_whitespace(context);
+        /* parse value */
+        if ((ret = json_parse_value(context, &mem.value)) != JSON_PARSE_OK)
+            break;
+        memcpy(json_context_push(context, sizeof(json_member)), &mem, sizeof(json_member));
+        size++;
+        mem.key = NULL; /* ownership is transferred to member on stack */
+        /* todo parse ws [comma | right-curly-brace] ws */
+        json_parse_whitespace(context);
+        if (*context->json == ',') {
+            context->json++;
+            json_parse_whitespace(context);
+        }
+        else if (*context->json == '}') {
+            context->json++;
+            value->type = JSON_OBJECT;
+            value->msize = size;
+            size_t size_tmp = sizeof(json_member) * size;
+            value->mem = (json_member*)malloc(size_tmp);
+            memcpy(value->mem, json_context_pop(context, size_tmp), size_tmp);
+            return JSON_PARSE_OK;
+        }
+        else {
+            ret = JSON_PARSE_MISS_COMMA_OR_CURLY_BRACKET;
+            break;
+        }
+    }
+    /* todo Pop and free members on the stack */
+    free(mem.key);
+    for (int i = 0; i < size; i++) {
+        json_member* m = (json_member*)json_context_pop(context, sizeof(json_member));
+        free(m->key);
+        json_free(&m->value);
+    }
+    value->type = JSON_NULL;
+    return ret;
+}
+
+// Unoptimized
+#if 0
+static void lept_stringify_string(json_context* c, const char* s, size_t len) {
+    size_t i;
+    assert(s != NULL);
+    PUTC(c, '"');
+    for (i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)s[i];
+        switch (ch) {
+            case '\"': PUTS(c, "\\\"", 2); break;
+            case '\\': PUTS(c, "\\\\", 2); break;
+            case '\b': PUTS(c, "\\b",  2); break;
+            case '\f': PUTS(c, "\\f",  2); break;
+            case '\n': PUTS(c, "\\n",  2); break;
+            case '\r': PUTS(c, "\\r",  2); break;
+            case '\t': PUTS(c, "\\t",  2); break;
+            default:
+                if (ch < 0x20) {
+                    char buffer[7];
+                    sprintf(buffer, "\\u%04X", ch);
+                    PUTS(c, buffer, 6);
+                }
+                else
+                    PUTC(c, s[i]);
+        }
+    }
+    PUTC(c, '"');
+}
+#else
+
+static int json_stringify_string(json_context* context, const char* str, size_t len) {
+    static const char hex_digits[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
+    size_t size;
+    char* head, *p;
+    assert(str != NULL);
+    /* 每个字符可生成最长的形式是 `\u00XX`,占 6 个字符，以及双引号,故为 len * 6 + 2 */
+    p = head = json_context_push(context, size = len * 6 + 2); /* "\u00xx..."*/
+    *p++ = '"';
+
+    // PUTC(context, '"');
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)str[i];
+        switch (ch) {
+            case '\"': *p++ = '\\'; *p++ = '\"'; break;
+            case '\\': *p++ = '\\'; *p++ = '\\'; break;
+            case '\b': *p++ = '\\'; *p++ = 'b';  break;
+            case '\f': *p++ = '\\'; *p++ = 'f';  break;
+            case '\n': *p++ = '\\'; *p++ = 'n';  break;
+            case '\r': *p++ = '\\'; *p++ = 'r';  break;
+            case '\t': *p++ = '\\'; *p++ = 't';  break;
+            default:
+                if (ch < 0x20) {
+                    *p++ = '\\'; *p++ = 'u'; *p++ = '0'; *p++ = '0';
+                    *p++ = hex_digits[ch >> 4];
+                    *p++ = hex_digits[ch & 15];
+                }
+                else
+                    *p++ = str[i];
+        }
+    }
+    *p++ = '"';
+    context->top -= size - (p - head);
+    /*空间换时间*/
+    /*优化的代价是可能会多分配6倍内存 且程序体积变大*/
+}
+#endif
+static int json_stringify_value(json_context* context, const json_value* value) {
+    int ret;
+    switch(value->type) {
+        case JSON_NULL:     PUTS(context, "null", 4); break;
+        case JSON_FALSE:    PUTS(context, "false", 5); break;
+        case JSON_TRUE:     PUTS(context, "true", 4); break;
+        case JSON_STRING:   json_stringify_string(context, value->str, value->len); break;
+        case JSON_NUMBER:
+            {
+                // context->top -= 32 - sprintf(json_context_push(context, 32), "%.17g", value->num); break;
+                char* buffer = json_context_push(context, 32);
+                /*使用 `sprintf("%.17g", ...)` 把双精度浮点数转换成可还原的文本*/
+                // printf("-----%.17g\n",value->num);
+                int length = sprintf(buffer, "%.17g", value->num);
+                context->top -= 32 - length;
+            }
+            break;
+        case JSON_ARRAY:
+            PUTC(context, '[');
+            for(size_t i = 0; i < value->size; i++) {
+                if (i > 0) PUTC(context, ',');
+                json_stringify_value(context, &value->ele[i]);
+            }
+            PUTC(context, ']');
+            break;
+        case JSON_OBJECT:
+            PUTC(context, '{');
+            for(int i = 0; i < value->msize; i++) {
+                if (i > 0) PUTC(context, ',');
+                json_stringify_string(context, value->mem[i].key, value->mem[i].keylen);
+                PUTC(context, ':');
+                json_stringify_value(context, &value->mem[i].value);
+            }
+            PUTC(context, '}');
+            break;
+        /* ... */
+        default: assert(0 && "invalid type");
+    }
+    return JSON_STRINGIFY_OK;
+}
+
+int json_stringify(const json_value* value, char**json, size_t* length) {
+    json_context context;
+    int ret;
+    assert(value != NULL);
+    assert(json != NULL);
+    context.stack = (char*)malloc(context.size = JSON_PARSE_STRINGIFY_INIT_SIZE);
+    context.top = 0;
+    if ((ret = json_stringify_value(&context, value)) != JSON_STRINGIFY_OK) {
+        free(context.stack);
+        *json = NULL;
+        return ret;
+    }
+    /* 可 strlen(), 但避免调用方额外消耗  */
+    if (length)
+        *length = context.top;
+    PUTC(&context, '\0');
+    *json = context.stack;
+    return JSON_STRINGIFY_OK;
+}
+
 /* value = null / false / true / numver */
 static int json_parse_value(json_context* context, json_value* value) {
     switch (*context->json) {
@@ -262,6 +479,7 @@ static int json_parse_value(json_context* context, json_value* value) {
         default:   return json_parse_number(context, value);
         case '"':  return json_parse_string(context, value);
         case '[':  return json_parse_array(context, value);
+        case '{':  return json_parse_object(context, value);
         case '\0': return JSON_PARSE_EXPECT_VALUE;
     }
 }
@@ -275,8 +493,7 @@ int json_parse(json_value* value, const char* json) {
     context.size = context.top = 0;
     json_init(value);
     json_parse_whitespace(&context);
-    ret = json_parse_value(&context, value);
-    if (ret == JSON_PARSE_OK) {
+    if ((ret = json_parse_value(&context, value)) == JSON_PARSE_OK) {
         json_parse_whitespace(&context);
         if (*context.json != '\0') {
             value->type = JSON_NULL;
@@ -291,10 +508,24 @@ int json_parse(json_value* value, const char* json) {
 void json_free(json_value* value) {
     assert(value != NULL);
     /* JSON_STRING => JSON_NULL 避免重复释放 */
-    if (value->type == JSON_STRING)
-        free(value->str);
-    else if (value->type == JSON_ARRAY)
-        free(value->ele);
+    switch (value->type) {
+        case JSON_STRING:
+            free(value->str);
+            break;
+        case JSON_ARRAY:
+            for (size_t i = 0; i < value->size; i++)
+                json_free(&value->ele[i]);
+            free(value->ele);
+            break;
+        case JSON_OBJECT:
+            for (size_t i = 0; i< value->msize; i++) {
+                free(value->mem[i].key);
+                json_free(&value->mem[i].value);
+            }
+            free(value->mem);
+            break;
+        default: break;
+    }
     value->type = JSON_NULL;
 }
 
@@ -359,4 +590,25 @@ json_value* json_get_array_element(const json_value* value, size_t index) {
     assert(value != NULL && value->type == JSON_ARRAY);
     assert(index < value->size);
     return &((value->ele)[index]);
+}
+
+size_t json_get_object_size(const json_value* value) {
+    assert(value != NULL && value->type == JSON_OBJECT);
+    return value->msize;
+}
+
+const char* json_get_object_key(const json_value* value, size_t index) {
+    assert(value!= NULL && value->type == JSON_OBJECT);
+    assert(index < value->msize);
+    return value->mem[index].key;
+}
+size_t json_get_object_key_length(const json_value* value, size_t index) {
+    assert(value != NULL && value->type == JSON_OBJECT);
+    assert(index < value->msize);
+    return value->mem[index].keylen;
+}
+json_value* json_get_object_value(const json_value* value, size_t index) {
+    assert(value != NULL && value->type == JSON_OBJECT);
+    assert(index < value->msize);
+    return &value->mem[index].value;
 }
